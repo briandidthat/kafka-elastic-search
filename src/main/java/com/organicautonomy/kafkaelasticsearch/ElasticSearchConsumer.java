@@ -50,7 +50,7 @@ public class ElasticSearchConsumer {
         return new RestHighLevelClient(builder);
     }
 
-    public static KafkaConsumer<String, String> createConsumer(String topic) {
+    public static KafkaConsumer<String, String> createConsumer(final String topic) {
         String bootstrapServer = "localhost:9092";
         String groupId = "third_application";
 
@@ -102,13 +102,11 @@ public class ElasticSearchConsumer {
                     // extract unique id from data to ensure idempotence using twitter feed
                     String id = extractIdFromTweet(record.value());
 
-                    // extract value from record
-                    String jsonString = record.value();
-
-                    // create IndexRequest object to send data to elastic
+                    // create IndexRequest object to send data to elastic using twitter
                     IndexRequest indexRequest = new IndexRequest("twitter");
-                    indexRequest.id(id); // set the id we extracted previously to ensure idempotence
-                    indexRequest.source(jsonString, XContentType.JSON); // add data to request object
+                    indexRequest
+                            .source(record.value(), XContentType.JSON) // add data (value) to request object
+                            .id(id);  // set the id we extracted previously to ensure idempotence
 
                     // add the request into a bulk request object to optimize performance
                     bulkRequest.add(indexRequest);
@@ -120,7 +118,6 @@ public class ElasticSearchConsumer {
             if (records.count() > 0) {
                 // send data to elastic search and get response using BulkResponse object
                 BulkResponse bulkItemResponses = client.bulk(bulkRequest, RequestOptions.DEFAULT);
-
                 logger.info("Committing offsets...");
                 consumer.commitSync();
                 logger.info("Offsets have been committed.");
