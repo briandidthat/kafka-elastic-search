@@ -1,5 +1,7 @@
 package com.organicautonomy.kafkaelasticsearch;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonParser;
 import io.github.cdimascio.dotenv.Dotenv;
 import org.apache.http.HttpHost;
 import org.apache.http.auth.AuthScope;
@@ -69,6 +71,13 @@ public class ElasticSearchConsumer {
         return consumer;
     }
 
+    private static String extractIdFromTweet(String value) {
+        return JsonParser.parseString(value)
+                .getAsJsonObject()
+                .get("id_str")
+                .getAsString();
+    }
+
     public static void main(String[] args) throws IOException {
         // create rest high level client for api calls to elastic search
         RestHighLevelClient client = createClient();
@@ -77,19 +86,27 @@ public class ElasticSearchConsumer {
         KafkaConsumer<String, String> consumer = createConsumer("twitter_tweets");
 
         // loop through through the records in kafka and send to elastic search
-        while(true) {
+        while (true) {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
 
-            for (ConsumerRecord<String, String> record: records) {
+            for (ConsumerRecord<String, String> record : records) {
+                // create id to ensure idempotence using twitter feed
+                String id = extractIdFromTweet(record.value());
+
                 // extract value from record
                 String jsonString = record.value();
+
+                logger.info("Record id: " + id);
+                logger.info("Record value: " + jsonString);
+
                 // create IndexRequest object to send data to elastic
                 IndexRequest indexRequest = new IndexRequest("twitter");
+                indexRequest.id(id); // set the id we extracted previously to ensure idempotence
                 indexRequest.source(jsonString, XContentType.JSON); // add data to request object
+
                 // send data to elastic search and get response
                 IndexResponse indexResponse = client.index(indexRequest, RequestOptions.DEFAULT);
-                String id = indexResponse.getId();
-                logger.info(id);
+                logger.info("Response id: " + indexResponse.getId());
 
                 try {
                     Thread.sleep(1000);
@@ -99,7 +116,7 @@ public class ElasticSearchConsumer {
             }
         }
 
-        // close the connection
-        //client.close();
+//         close the connection
+//        client.close();
     }
 }
