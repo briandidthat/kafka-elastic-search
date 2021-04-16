@@ -1,6 +1,5 @@
 package com.organicautonomy.kafkaelasticsearch;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonParser;
 import io.github.cdimascio.dotenv.Dotenv;
 import org.apache.http.HttpHost;
@@ -13,8 +12,9 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestClientBuilder;
@@ -50,7 +50,7 @@ public class ElasticSearchConsumer {
         return new RestHighLevelClient(builder);
     }
 
-    public static KafkaConsumer<String, String> createConsumer(String topic) {
+    public static KafkaConsumer<String, String> createConsumer(final String topic) {
         String bootstrapServer = "localhost:9092";
         String groupId = "third_application";
 
@@ -61,6 +61,8 @@ public class ElasticSearchConsumer {
         properties.setProperty(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false"); // disable autocommit of offsets
+        properties.setProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "20"); // limit the max polled records to 20
 
         // create a consumer
         KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties);
@@ -89,31 +91,38 @@ public class ElasticSearchConsumer {
         while (true) {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
 
+            // log count of records
+            logger.info("Received " + records.count());
+
+            // create bulk request object for sending data to elastic search in batches
+            BulkRequest bulkRequest = new BulkRequest();
+
             for (ConsumerRecord<String, String> record : records) {
-                // create id to ensure idempotence using twitter feed
-                String id = extractIdFromTweet(record.value());
-
-                // extract value from record
-                String jsonString = record.value();
-
-                logger.info("Record id: " + id);
-                logger.info("Record value: " + jsonString);
-
-                // create IndexRequest object to send data to elastic
-                IndexRequest indexRequest = new IndexRequest("twitter");
-                indexRequest.id(id); // set the id we extracted previously to ensure idempotence
-                indexRequest.source(jsonString, XContentType.JSON); // add data to request object
-
-                // send data to elastic search and get response
-                IndexResponse indexResponse = client.index(indexRequest, RequestOptions.DEFAULT);
-                logger.info("Response id: " + indexResponse.getId());
-
                 try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+                    // extract unique id from data to ensure idempotence using twitter feed
+                    String id = extractIdFromTweet(record.value());
+
+                    // create IndexRequest object to send data to elastic using twitter
+                    IndexRequest indexRequest = new IndexRequest("twitter");
+                    indexRequest
+                            .source(record.value(), XContentType.JSON) // add data (value) to request object
+                            .id(id);  // set the id we extracted previously to ensure idempotence
+
+                    // add the request into a bulk request object to optimize performance
+                    bulkRequest.add(indexRequest);
+                } catch (NullPointerException e) {
+                    logger.warn("Skipping bad data: " + record.value());
                 }
             }
+
+            if (records.count() > 0) {
+                // send data to elastic search and get response using BulkResponse object
+                BulkResponse bulkItemResponses = client.bulk(bulkRequest, RequestOptions.DEFAULT);
+                logger.info("Committing offsets...");
+                consumer.commitSync();
+                logger.info("Offsets have been committed.");
+            }
+
         }
 
 //         close the connection
